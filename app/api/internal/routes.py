@@ -747,7 +747,7 @@ async def analyze_stocks(
                     params=params,
                     files=files,
                     headers={
-                        'X-API-Key': 'pntr_Seg5n36d0C7ffE8x7yZ_0TCIyLa76tp6atgyDx24RBw'
+                        'X-API-Key': ''
                     },
                     timeout=30.0  # Set reasonable timeout
                 )
@@ -772,4 +772,29 @@ async def analyze_stocks(
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
+        )
+
+@router.post("/validate-token", response_model=schemas.TokenValidationResponse)
+async def validate_token(request: schemas.TokenValidationRequest):
+    try:
+        # Verify the token using Firebase Admin SDK
+        decoded_token = firebase_auth.verify_id_token(request.token)
+        
+        # Get additional user information
+        user = firebase_auth.get_user(decoded_token['uid'])
+        
+        # Return successful validation response with user info
+        return schemas.TokenValidationResponse(
+            is_valid=True,
+            uid=user.uid,
+            email=user.email,
+            display_name=user.display_name,
+            email_verified=user.email_verified
+        )
+        
+    except Exception as e:
+        # Return failed validation response with error message
+        return schemas.TokenValidationResponse(
+            is_valid=False,
+            error_message=str(e)
         )

@@ -129,3 +129,15 @@ class StockAlertDelete(BaseModel):
 
 class StockAnalysisRequest(BaseModel):
     stock_codes: List[str]
+
+
+class TokenValidationRequest(BaseModel):
+    token: str
+    
+class TokenValidationResponse(BaseModel):
+    is_valid: bool
+    uid: str | None = None
+    email: str | None = None
+    display_name: str | None = None
+    email_verified: bool | None = None
+    error_message: str | None = None
