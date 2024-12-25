@@ -1,13 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Header
 from typing import Optional
-from ...core.security import verify_api_key, create_jwt_token, verify_jwt_token
+from ...core.security import verify_jwt_token
 
 router = APIRouter()
-
-@router.post("/token")
-async def get_token(api_key: str = Depends(verify_api_key)):
-    token = create_jwt_token()
-    return {"access_token": token}
 
 @router.get("/")
 async def secure_route(authorization: Optional[str] = Header(None)):
