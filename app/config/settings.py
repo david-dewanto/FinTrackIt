@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     API_KEY: str = "your-super-secret-api-key"  # In production, use environment variable
     JWT_SECRET: str = "your-jwt-secret-key"      # In production, use environment variable
     ALLOWED_ORIGINS: List[str] = [
-        "http://localhost:3000",
+        "http://localhost",
         "https://yourapp.com"
     ]
     JWT_ALGORITHM: str = "HS256"

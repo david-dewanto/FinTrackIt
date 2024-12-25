@@ -2,13 +2,20 @@ from datetime import datetime, timedelta
 import jwt
 from fastapi import HTTPException, Security, Depends
 from fastapi.security import APIKeyHeader
-from typing import Optional
 from ..config.settings import settings
+import secrets
+from sqlalchemy.orm import Session
+from ..db.database import get_db
+from ..models.models import APIKey
 
 api_key_header = APIKeyHeader(name="X-API-Key")
 
-def verify_api_key(api_key: str = Security(api_key_header)):
-    if api_key != settings.API_KEY:
+def verify_api_key(
+    api_key: str = Security(api_key_header),
+    db: Session = Depends(get_db)
+):
+    db_api_key = db.query(APIKey).filter(APIKey.api_key == api_key).first()
+    if not db_api_key:
         raise HTTPException(
             status_code=403,
             detail="Invalid API key"
@@ -29,3 +36,6 @@ def verify_jwt_token(token: str) -> bool:
         return True
     except jwt.InvalidTokenError:
         return False
+
+def generate_api_key() -> str:
+    return secrets.token_urlsafe(32)
