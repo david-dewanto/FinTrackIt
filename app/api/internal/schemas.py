@@ -39,3 +39,10 @@ class AuthResponse(BaseModel):
 class TokenResponse(BaseModel):
     valid: bool
     uid: str
+
+class EmailVerificationRequest(BaseModel):
+    email: EmailStr
+
+class EmailVerificationResponse(BaseModel):
+    success: bool
+    message: str

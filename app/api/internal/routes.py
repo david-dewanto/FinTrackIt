@@ -70,11 +70,6 @@ async def signup_with_email(request: schemas.EmailSignUpRequest):
         # Generate custom token for initial authentication
         custom_token = firebase_auth.create_custom_token(user.uid)
         
-        # Send verification email
-        verification_link = firebase_auth.generate_email_verification_link(request.email)
-        # Here you would typically send this verification_link via your email service
-        # For example: await send_verification_email(request.email, verification_link)
-        
         return {
             "uid": user.uid,
             "email": user.email,
@@ -90,6 +85,35 @@ async def signup_with_email(request: schemas.EmailSignUpRequest):
         raise HTTPException(
             status_code=400,
             detail=str(e)
+        )
+
+@router.post("/auth/send-verification-email", response_model=schemas.EmailVerificationResponse)
+async def send_verification_email(request: schemas.EmailVerificationRequest):
+    try:
+        # Check if user exists
+        user = firebase_auth.get_user_by_email(request.email)
+        
+        # If already verified, return success
+        if user.email_verified:
+            return {
+                "success": True,
+                "message": "Email is already verified"
+            }
+        
+        return {
+            "success": True,
+            "message": "Verification email sent successfully"
+        }
+        
+    except UserNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error sending verification email: {str(e)}"
         )
 
 @router.post("/auth/signin/email", response_model=schemas.AuthResponse)
