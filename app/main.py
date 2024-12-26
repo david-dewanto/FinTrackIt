@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from .core.middleware import setup_cors_middleware
+from .core.middleware import setup_middleware
 from .api.public import routes as public_routes
 from .api.secure import routes as secure_routes
 from .api.internal import routes as internal_routes
@@ -13,7 +13,7 @@ models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title="FastAPI Service")
 
 # Setup CORS middleware
-setup_cors_middleware(app)
+setup_middleware(app)
 
 # Include routers
 app.include_router(auth_routes.router, prefix="/v1/auth", tags=["auth"])

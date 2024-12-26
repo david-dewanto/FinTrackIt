@@ -1,17 +1,16 @@
-from fastapi import APIRouter
-from ...models.models import APIKey
-from .schemas import APIKeyRequest, APIKeyResponse
-from sqlalchemy.orm import Session
-from ...db.database import get_db
-from ...core.security import generate_api_key
+# app/api/internal/routes.py
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
 from firebase_admin import auth
 from firebase_admin.auth import (
     EmailAlreadyExistsError, 
     UserNotFoundError,
     InvalidIdTokenError
 )
-from ...core.firebase import get_firebase_admin
+from ...db.database import get_db
+from ...core.security import generate_api_key
+from ...core.firebase import get_firebase_admin, sign_in_with_email_password, send_verification_email, send_password_reset_email
+from ...models.models import APIKey
 from . import schemas
 
 router = APIRouter()
@@ -21,10 +20,9 @@ firebase_auth = get_firebase_admin()
 async def internal_route():
     return {"message": "This is an internal endpoint"}
 
-
-@router.post("/generate-api-key", response_model=APIKeyResponse)
+@router.post("/generate-api-key", response_model=schemas.APIKeyResponse)
 async def generate_api_key_endpoint(
-    request: APIKeyRequest,
+    request: schemas.APIKeyRequest,
     db: Session = Depends(get_db)
 ):
     # Generate new API key
@@ -48,7 +46,7 @@ async def generate_api_key_endpoint(
         db.rollback()
         raise HTTPException(status_code=500, detail="Could not generate API key")
     
-    return APIKeyResponse(
+    return schemas.APIKeyResponse(
         api_key=new_api_key,
         full_name=request.full_name,
         application_name=request.application_name,
@@ -56,6 +54,55 @@ async def generate_api_key_endpoint(
         email=request.email,
         phone_number=request.phone_number
     )
+
+@router.post("/auth/signin/email", response_model=schemas.AuthResponse)
+async def signin_with_email(request: schemas.EmailSignInRequest):
+    try:
+        # First, attempt to sign in using REST API to get ID token
+        sign_in_response = await sign_in_with_email_password(request.email, request.password)
+        id_token = sign_in_response['idToken']
+        
+        # Get user details from Firebase Admin SDK
+        user = firebase_auth.get_user_by_email(request.email)
+        
+        # If email isn't verified, send verification email
+        if not user.email_verified:
+            try:
+                await send_verification_email(id_token)
+                return {
+                    "uid": user.uid,
+                    "email": user.email,
+                    "email_verified": False,
+                    "message": "Email not verified. A new verification email has been sent."
+                }
+            except Exception as e:
+                # If sending verification fails, still allow login but notify user
+                print(f"Error sending verification email: {str(e)}")
+                return {
+                    "uid": user.uid,
+                    "email": user.email,
+                    "email_verified": False,
+                    "message": "Email not verified. Failed to send verification email."
+                }
+        
+        # If email is verified, proceed with normal login
+        return {
+            "uid": user.uid,
+            "email": user.email,
+            "email_verified": True,
+            "message": None
+        }
+        
+    except UserNotFoundError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid credentials"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        )
 
 @router.post("/auth/signup/email", response_model=schemas.AuthResponse)
 async def signup_with_email(request: schemas.EmailSignUpRequest):
@@ -67,14 +114,22 @@ async def signup_with_email(request: schemas.EmailSignUpRequest):
             email_verified=False
         )
         
-        # Generate custom token for initial authentication
-        custom_token = firebase_auth.create_custom_token(user.uid)
+        try:
+            # Sign in the user to get ID token
+            sign_in_response = await sign_in_with_email_password(request.email, request.password)
+            id_token = sign_in_response['idToken']
+            
+            # Send verification email using the ID token
+            await send_verification_email(id_token)
+        except Exception as e:
+            # Log the error but don't block account creation
+            print(f"Error in verification flow: {str(e)}")
         
         return {
             "uid": user.uid,
             "email": user.email,
             "email_verified": user.email_verified,
-            "custom_token": custom_token.decode('utf-8')
+            "message": "Please check your email for verification link"
         }
     except EmailAlreadyExistsError:
         raise HTTPException(
@@ -87,24 +142,19 @@ async def signup_with_email(request: schemas.EmailSignUpRequest):
             detail=str(e)
         )
 
-@router.post("/auth/send-verification-email", response_model=schemas.EmailVerificationResponse)
-async def send_verification_email(request: schemas.EmailVerificationRequest):
+@router.post("/auth/reset-password", response_model=schemas.PasswordResetResponse)
+async def reset_password(request: schemas.PasswordResetRequest):
     try:
         # Check if user exists
         user = firebase_auth.get_user_by_email(request.email)
         
-        # If already verified, return success
-        if user.email_verified:
-            return {
-                "success": True,
-                "message": "Email is already verified"
-            }
+        # Send password reset email
+        result = await send_password_reset_email(request.email)
         
         return {
             "success": True,
-            "message": "Verification email sent successfully"
+            "message": "Password reset email sent successfully"
         }
-        
     except UserNotFoundError:
         raise HTTPException(
             status_code=404,
@@ -113,84 +163,5 @@ async def send_verification_email(request: schemas.EmailVerificationRequest):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error sending verification email: {str(e)}"
-        )
-
-@router.post("/auth/signin/email", response_model=schemas.AuthResponse)
-async def signin_with_email(request: schemas.EmailSignInRequest):
-    try:
-        # Get user by email
-        user = firebase_auth.get_user_by_email(request.email)
-        
-        # Check if email is verified
-        if not user.email_verified:
-            raise HTTPException(
-                status_code=400,
-                detail="Email not verified. Please verify your email first."
-            )
-        
-        # Generate custom token
-        custom_token = firebase_auth.create_custom_token(user.uid)
-        
-        return {
-            "uid": user.uid,
-            "email": user.email,
-            "email_verified": user.email_verified,
-            "custom_token": custom_token.decode('utf-8')
-        }
-    except UserNotFoundError:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid credentials"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=str(e)
-        )
-
-@router.post("/auth/signin/google", response_model=schemas.AuthResponse)
-async def signin_with_google(request: schemas.GoogleSignInRequest):
-    try:
-        # Verify Google ID token
-        decoded_token = firebase_auth.verify_id_token(request.id_token)
-        
-        # Get or create user
-        try:
-            user = firebase_auth.get_user_by_email(decoded_token['email'])
-        except UserNotFoundError:
-            user = firebase_auth.create_user(
-                email=decoded_token['email'],
-                email_verified=True,
-            )
-        
-        # Generate custom token
-        custom_token = firebase_auth.create_custom_token(user.uid)
-        
-        return {
-            "uid": user.uid,
-            "email": user.email,
-            "email_verified": user.email_verified,
-            "custom_token": custom_token.decode('utf-8')
-        }
-    except InvalidIdTokenError:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid Google ID token"
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=str(e)
-        )
-
-@router.post("/auth/verify-token")
-async def verify_token(token: str):
-    try:
-        decoded_token = firebase_auth.verify_id_token(token)
-        return {"valid": True, "uid": decoded_token['uid']}
-    except:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid token"
+            detail=f"Error sending password reset email: {str(e)}"
         )

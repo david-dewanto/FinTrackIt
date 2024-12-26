@@ -1,30 +1,54 @@
-from datetime import datetime, timedelta
-from jose import jwt, JWTError  # Changed from jwt to jose
-from fastapi import HTTPException, Security, Depends
+# app/core/security.py
+from fastapi import HTTPException, Security, Depends, Request
 from fastapi.security import APIKeyHeader
-from typing import Optional
-from ..config.settings import settings
-import secrets 
 from sqlalchemy.orm import Session
-from ..models.models import APIKey 
+from ..models.models import APIKey
 from ..db.database import get_db
+from ..config.settings import settings
+import secrets
+from jose import jwt, JWTError
+from datetime import timedelta, datetime
 
-api_key_header = APIKeyHeader(name="X-API-Key")
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-def verify_api_key(
-    api_key: str = Security(api_key_header),
+async def verify_api_key(
+    request: Request,
+    api_key: str | None = Security(api_key_header),
     db: Session = Depends(get_db)
 ):
-    # Query the database for the provided API key
-    db_api_key = db.query(APIKey).filter(APIKey.api_key == api_key).first()
+    path = request.url.path
     
-    if not db_api_key:
+    # Internal routes - only check frontend server IP
+    if "/v1/internal/" in path:
+        if request.client.host == settings.FRONTEND_SERVER_IP:
+            return True
         raise HTTPException(
             status_code=403,
-            detail="Invalid API key"
+            detail="Access to internal routes is restricted"
         )
-    return api_key
+    
+    # Secure routes - require valid API key
+    if "/v1/secure/" in path:
+        if not api_key:
+            raise HTTPException(
+                status_code=403,
+                detail="API key required for secure routes"
+            )
+        
+        db_api_key = db.query(APIKey).filter(APIKey.api_key == api_key).first()
+        if not db_api_key:
+            raise HTTPException(
+                status_code=403,
+                detail="Invalid API key"
+            )
+        return api_key
+    
+    # Public and auth routes - no verification needed
+    return True
 
+def generate_api_key() -> str:
+    """Generate a new API key for external applications"""
+    return secrets.token_urlsafe(32)
 
 def create_jwt_token() -> str:
     expiration = datetime.utcnow() + timedelta(hours=settings.JWT_EXPIRATION_HOURS)
@@ -40,6 +64,3 @@ def verify_jwt_token(token: str) -> bool:
         return True
     except JWTError:  
         return False
-    
-def generate_api_key() -> str:
-    return secrets.token_urlsafe(32)

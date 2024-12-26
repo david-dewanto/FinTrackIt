@@ -1,3 +1,4 @@
+# app/api/internal/schemas.py
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 
@@ -28,12 +29,11 @@ class EmailSignInRequest(BaseModel):
 class GoogleSignInRequest(BaseModel):
     id_token: str
 
-# Auth Response Schema
 class AuthResponse(BaseModel):
     uid: str
     email: str
     email_verified: bool
-    custom_token: str
+    message: Optional[str] = None
 
 # Token Verification Schema
 class TokenResponse(BaseModel):
@@ -42,7 +42,15 @@ class TokenResponse(BaseModel):
 
 class EmailVerificationRequest(BaseModel):
     email: EmailStr
+    password: str  
 
 class EmailVerificationResponse(BaseModel):
+    success: bool
+    message: str
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+class PasswordResetResponse(BaseModel):
     success: bool
     message: str
