@@ -24,35 +24,48 @@ async def generate_api_key_endpoint(
     request: schemas.APIKeyRequest,
     db: Session = Depends(get_db)
 ):
-    # Generate new API key
-    new_api_key = generate_api_key()
-    
-    # Create new API key record
-    db_api_key = APIKey(
-        api_key=new_api_key,
-        full_name=request.full_name,
-        application_name=request.application_name,
-        organization=request.organization,
-        email=request.email,
-        phone_number=request.phone_number
-    )
-    
     try:
-        db.add(db_api_key)
+        # Check if email already exists
+        existing_key = db.query(APIKey).filter(APIKey.email == request.email).first()
+        
+        # Generate new API key
+        new_api_key = generate_api_key()
+        
+        if existing_key:
+            # Update existing record
+            existing_key.api_key = new_api_key
+            existing_key.full_name = request.full_name
+            existing_key.application_name = request.application_name
+            existing_key.organization = request.organization
+            existing_key.phone_number = request.phone_number
+            db_api_key = existing_key
+        else:
+            # Create new API key record
+            db_api_key = APIKey(
+                api_key=new_api_key,
+                full_name=request.full_name,
+                application_name=request.application_name,
+                organization=request.organization,
+                email=request.email,
+                phone_number=request.phone_number
+            )
+            db.add(db_api_key)
+        
         db.commit()
         db.refresh(db_api_key)
+        
+        return schemas.APIKeyResponse(
+            api_key=new_api_key,
+            full_name=request.full_name,
+            application_name=request.application_name,
+            organization=request.organization,
+            email=request.email,
+            phone_number=request.phone_number
+        )
+        
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail="Could not generate API key")
-    
-    return schemas.APIKeyResponse(
-        api_key=new_api_key,
-        full_name=request.full_name,
-        application_name=request.application_name,
-        organization=request.organization,
-        email=request.email,
-        phone_number=request.phone_number
-    )
 
 @router.post("/auth/signin/email", response_model=schemas.AuthResponse)
 async def signin_with_email(request: schemas.EmailSignInRequest):

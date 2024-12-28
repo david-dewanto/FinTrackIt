@@ -11,6 +11,6 @@ class APIKey(Base):
     full_name = Column(String)
     application_name = Column(String)
     organization = Column(String)
-    email = Column(String)
+    email = Column(String, unique=True, index=True)  
     phone_number = Column(String)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
