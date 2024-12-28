@@ -21,6 +21,7 @@ class APIKeyResponse(BaseModel):
 class EmailSignUpRequest(BaseModel):
     email: EmailStr
     password: str
+    display_name: str
 
 class EmailSignInRequest(BaseModel):
     email: EmailStr
@@ -33,6 +34,7 @@ class AuthResponse(BaseModel):
     uid: str
     email: str
     email_verified: bool
+    display_name: Optional[str] = None
     message: Optional[str] = None
 
 # Token Verification Schema

@@ -1,3 +1,5 @@
+# app/api/secure/routes.py
+
 from fastapi import APIRouter, Depends, HTTPException, Header
 from typing import Optional
 from ...core.security import verify_jwt_token
