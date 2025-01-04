@@ -4,7 +4,7 @@ from typing import List
 
 class Settings(BaseSettings):
     # Existing settings
-    JWT_SECRET: str = "your-jwt-secret"
+    JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 1
     FIREBASE_SERVICE_ACCOUNT_PATH: str
