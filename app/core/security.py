@@ -6,7 +6,7 @@ from ..models.models import APIKey
 from ..db.database import get_db
 from ..config.settings import settings
 import secrets
-from jose import jwt, JWTError
+from jose import jwt, JWTError, ExpiredSignatureError
 from datetime import timedelta, datetime
 from typing import Optional
 
@@ -74,11 +74,24 @@ async def verify_access(
     # For secure routes, try JWT first
     if "/v1/secure/" in path:
         # If valid JWT token exists, allow access
-        if token and verify_jwt_token(token):
-            return True
-            
+        if token:
+            try:
+                verify_jwt_token(token)
+                return True
+            except ExpiredSignatureError:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Token has expired. Please refresh your token."
+                )
+            except JWTError:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Invalid token"
+                )
+
         # If no token or invalid token, fallback to API key verification
-        return await verify_api_key(api_key, db)
+        if api_key:
+            return await verify_api_key(api_key, db)
     
     # Auth routes - only need API key to get token
     if "/v1/auth/" in path:

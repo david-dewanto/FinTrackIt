@@ -1,4 +1,3 @@
-# Dockerfile
 FROM python:3.12-slim
 
 # Set working directory
@@ -8,9 +7,13 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies
+# Install system dependencies including mailutils
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libpq-dev \
+    && apt-get install -y --no-install-recommends \
+        gcc \
+        libpq-dev \
+        mailutils \
+        postfix \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
