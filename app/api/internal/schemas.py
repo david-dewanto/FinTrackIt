@@ -1,6 +1,8 @@
 # app/api/internal/schemas.py
 from pydantic import BaseModel, EmailStr
-from typing import Optional
+from typing import Optional, List
+from datetime import datetime
+from enum import Enum
 
 class APIKeyRequest(BaseModel):
     full_name: str
@@ -36,6 +38,7 @@ class AuthResponse(BaseModel):
     email_verified: bool
     display_name: Optional[str] = None
     message: Optional[str] = None
+    id_token: str 
 
 # Token Verification Schema
 class TokenResponse(BaseModel):
@@ -56,3 +59,41 @@ class PasswordResetRequest(BaseModel):
 class PasswordResetResponse(BaseModel):
     success: bool
     message: str
+
+from pydantic import BaseModel
+from typing import List, Optional
+from datetime import datetime
+from enum import Enum
+
+class TransactionType(str, Enum):
+    BUY = "buy"
+    SELL = "sell"
+
+class TransactionCreate(BaseModel):
+    stock_code: str
+    transaction_type: TransactionType
+    quantity: int
+    transaction_date: datetime  # Added transaction_date field
+    token: str
+
+class TransactionDelete(BaseModel):
+    token: str
+
+class TransactionList(BaseModel):
+    token: str
+
+class TransactionResponse(BaseModel):
+    id: str
+    uid: str
+    stock_code: str
+    transaction_type: TransactionType
+    quantity: int
+    price_per_share: int
+    total_value: int
+    transaction_date: datetime
+
+    class Config:
+        from_attributes = True
+
+class TransactionListResponse(BaseModel):
+    transactions: List[TransactionResponse]

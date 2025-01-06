@@ -1,5 +1,6 @@
 # app/api/internal/routes.py
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from typing import Optional, List
 from sqlalchemy.orm import Session
 from firebase_admin import auth
 from firebase_admin.auth import (
@@ -9,8 +10,11 @@ from firebase_admin.auth import (
 from ...db.database import get_db
 from ...core.security import generate_api_key
 from ...core.firebase import get_firebase_admin, sign_in_with_email_password, send_verification_email, send_password_reset_email
-from ...models.models import APIKey
+from ...models.models import APIKey, Transaction
+from ..secure.routes import get_stock_price
 from . import schemas
+from datetime import timedelta
+import logging
 
 router = APIRouter()
 firebase_auth = get_firebase_admin()
@@ -103,6 +107,7 @@ async def signin_with_email(request: schemas.EmailSignInRequest):
             "email": user.email,
             "display_name": user.display_name,
             "email_verified": True,
+            "id_token": id_token,  # Include ID token in response
             "message": None
         }
         
@@ -269,6 +274,7 @@ async def signin_with_google(request: schemas.GoogleSignInRequest):
                     "email": existing_user.email,
                     "email_verified": existing_user.email_verified,
                     "display_name": existing_user.display_name,
+                    "id_token": request.id_token,  
                     "message": None
                 }
             
@@ -309,3 +315,126 @@ async def signin_with_google(request: schemas.GoogleSignInRequest):
             status_code=400,
             detail=f"Failed to authenticate with Google: {str(e)}"
         )
+
+@router.post("/transactions", response_model=schemas.TransactionResponse)
+async def create_transaction(
+    transaction: schemas.TransactionCreate,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Validate quantity
+        if transaction.quantity <= 0:
+            raise HTTPException(
+                status_code=400, 
+                detail="Quantity must be greater than 0"
+            )
+
+        # Verify token and get user info
+        try:
+            decoded_token = auth.verify_id_token(transaction.token)
+            uid = decoded_token['uid']
+        except Exception as e:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Convert transaction date to date for stock price query
+        transaction_date = transaction.transaction_date.date()
+        # Get the day before and after to ensure we get the nearest trading day's price
+        date_str = f"{transaction_date - timedelta(days=1)}_{transaction_date + timedelta(days=1)}"
+        
+        # Get stock price using the existing endpoint
+        try:
+            stock_data = await get_stock_price(transaction.stock_code, date_str, db)
+            if not stock_data.prices or not stock_data.prices[-1]:
+                raise HTTPException(status_code=404, detail="Could not get stock price for specified date")
+            
+            # Use the latest price in the range (which should be the nearest trading day)
+            current_price = stock_data.prices[-1].closing_price
+
+        except HTTPException as e:
+            raise HTTPException(status_code=e.status_code, detail=str(e.detail))
+
+        # Calculate total value
+        total_value = transaction.quantity * current_price
+
+        # Create new transaction
+        db_transaction = Transaction(
+            uid=uid,
+            stock_code=transaction.stock_code,
+            transaction_type=transaction.transaction_type,
+            quantity=transaction.quantity,
+            price_per_share=current_price,
+            total_value=total_value,
+            transaction_date=transaction.transaction_date
+        )
+
+        db.add(db_transaction)
+        db.commit()
+        db.refresh(db_transaction)
+
+        return db_transaction
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/transactions/list", response_model=schemas.TransactionListResponse)
+async def get_transactions(
+    request: schemas.TransactionList,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Verify token and get user info
+        try:
+            decoded_token = auth.verify_id_token(request.token)
+            uid = decoded_token['uid']
+        except Exception as e:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Get user's transactions
+        transactions = db.query(Transaction).filter(Transaction.uid == uid).all()
+        # Ensure we always return a list, even if empty
+        return schemas.TransactionListResponse(transactions=transactions or [])
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/transactions/delete/{transaction_id}")
+async def delete_transaction(
+    transaction_id: str,
+    request: schemas.TransactionDelete,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Verify token and get user info
+        try:
+            decoded_token = auth.verify_id_token(request.token)
+            uid = decoded_token['uid']
+        except Exception as e:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # Get transaction
+        transaction = db.query(Transaction).filter(
+            Transaction.id == transaction_id,
+            Transaction.uid == uid  # Add this to ensure we only get user's own transaction
+        ).first()
+        
+        if not transaction:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+
+        try:
+            # Delete transaction
+            db.delete(transaction)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(status_code=500, detail="Failed to delete transaction")
+
+        return {"message": "Transaction deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
