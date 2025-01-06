@@ -339,7 +339,7 @@ async def create_transaction(
         # Convert transaction date to date for stock price query
         transaction_date = transaction.transaction_date.date()
         # Get the day before and after to ensure we get the nearest trading day's price
-        date_str = f"{transaction_date - timedelta(days=1)}_{transaction_date + timedelta(days=1)}"
+        date_str = f"{transaction_date}_{transaction_date}"
         
         # Get stock price using the existing endpoint
         try:

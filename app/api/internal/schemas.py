@@ -38,7 +38,7 @@ class AuthResponse(BaseModel):
     email_verified: bool
     display_name: Optional[str] = None
     message: Optional[str] = None
-    id_token: str 
+    id_token: Optional[str] = None 
 
 # Token Verification Schema
 class TokenResponse(BaseModel):
@@ -59,11 +59,6 @@ class PasswordResetRequest(BaseModel):
 class PasswordResetResponse(BaseModel):
     success: bool
     message: str
-
-from pydantic import BaseModel
-from typing import List, Optional
-from datetime import datetime
-from enum import Enum
 
 class TransactionType(str, Enum):
     BUY = "buy"
