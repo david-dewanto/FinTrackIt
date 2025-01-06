@@ -1,7 +1,7 @@
 # app/api/secure/routes.py
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
-from typing import Optional, List
+from typing import Optional, List, Dict
 import subprocess
 from .schemas import (
     EmailRequest, EmailResponse, 
@@ -12,7 +12,10 @@ from .schemas import (
     PortfolioAllocation,
     FeasibleRangeRequest,
     FeasibleRangeResponse,
-    RangeValues
+    RangeValues,
+    PortfolioReturnResponse,
+    PortfolioReturnRequest,
+    ReturnCalculationTransaction
 )
 from sqlalchemy.orm import Session 
 from datetime import datetime, timezone, timedelta, date
@@ -23,6 +26,11 @@ from sqlalchemy import and_
 from ...models.models import StockPrice, SharpeRatioCache
 import numpy as np
 from scipy.optimize import minimize
+from .schemas import (
+    TWRRequest, TWRResponse,
+    MWRRequest, MWRResponse
+)
+import numpy_financial as npf
 
 router = APIRouter()
 logging.basicConfig(level=logging.INFO)
@@ -42,9 +50,7 @@ def send_email(
     Send an email using the local Postfix server.
     Requires authentication.
     """
-    try:
-        logger.info(f"Attempting to send email to {email_data.recipient_email}")
-        
+    try:        
         # Construct the mail command
         mail_command = [
             'mail',
@@ -68,7 +74,6 @@ def send_email(
         
         # Check if the command was successful
         if process.returncode == 0:
-            logger.info(f"Email sent successfully to {email_data.recipient_email}")
             return EmailResponse(
                 success=True,
                 message="Email sent successfully"
@@ -99,6 +104,11 @@ async def get_stock_price(
         # Parse date range (assuming format: YYYY-MM-DD_YYYY-MM-DD)
         start_date = date.fromisoformat(date_range.split("_")[0])
         end_date = date.fromisoformat(date_range.split("_")[1])
+        
+        # For single-day queries, adjust end_date to include the next day
+        # This ensures yfinance returns data for the requested date
+        is_single_day = start_date == end_date
+        yf_end_date = end_date + timedelta(days=1) if is_single_day else end_date
                 
         stock_code = f"{stock_code}.JK"
 
@@ -112,7 +122,8 @@ async def get_stock_price(
         ).all()
 
         # If all dates are cached, return cached data
-        if cached_prices and len(cached_prices) == (end_date - start_date).days + 1:
+        expected_days = (end_date - start_date).days + 1
+        if cached_prices and len(cached_prices) == expected_days:
             prices = [
                 StockPriceData(
                     date=price.date,
@@ -125,7 +136,7 @@ async def get_stock_price(
         # Fetch from yfinance
         try:
             stock = yf.Ticker(stock_code)
-            hist = stock.history(start=start_date, end=end_date)
+            hist = stock.history(start=start_date, end=yf_end_date)
             
             if hist.empty:
                 raise HTTPException(
@@ -136,6 +147,10 @@ async def get_stock_price(
             # Prepare data for response and caching
             prices = []
             for entry_date, row in hist.iterrows():
+                # Skip data beyond the requested end_date for single-day queries
+                if is_single_day and entry_date.date() > end_date:
+                    continue
+                    
                 price_data = StockPriceData(
                     date=entry_date,
                     closing_price=int(row['Close']),
@@ -154,6 +169,13 @@ async def get_stock_price(
                 db.merge(db_price)
 
             db.commit()
+            
+            if not prices:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No data found for stock {stock_code} on {start_date}"
+                )
+                
             return StockPriceResponse(symbol=stock_code, prices=prices)
 
         except Exception as e:
@@ -599,3 +621,205 @@ async def get_portfolio_ranges(
             status_code=500,
             detail=f"Error calculating portfolio ranges: {str(e)}"
         )
+
+@router.post("/calculate-portfolio-returns", response_model=PortfolioReturnResponse, tags=["Analysis"])
+async def calculate_portfolio_returns(
+    request: PortfolioReturnRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Calculate both TWR and MWR for the entire portfolio, including individual stock breakdowns.
+    Uses latest market prices for current holdings.
+    """
+    try:
+        if not request.transactions:
+            raise HTTPException(
+                status_code=400,
+                detail="No transactions provided"
+            )
+
+        # Group transactions by stock code
+        stock_transactions: Dict[str, List[ReturnCalculationTransaction]] = {}
+        for tx in request.transactions:
+            if tx.stock_code not in stock_transactions:
+                stock_transactions[tx.stock_code] = []
+            stock_transactions[tx.stock_code].append(tx)
+
+        # Get latest prices for all stocks - look back up to 7 days to handle holidays
+        today = date.today()
+        week_ago = today - timedelta(days=7)
+        date_range = f"{week_ago.isoformat()}_{today.isoformat()}"
+        
+        latest_prices = {}
+        latest_dates = {}
+        for stock_code in stock_transactions.keys():
+            try:
+                latest_price_data = await get_stock_price(stock_code, date_range, db)
+                if not latest_price_data.prices:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Could not fetch latest price for stock {stock_code}"
+                    )
+                
+                # Get the most recent price from available data
+                latest_prices[stock_code] = latest_price_data.prices[-1].closing_price
+                latest_dates[stock_code] = datetime.combine(
+                    latest_price_data.prices[-1].date.date() if isinstance(latest_price_data.prices[-1].date, datetime)
+                    else latest_price_data.prices[-1].date,
+                    datetime.min.time()
+                )
+                
+            except HTTPException as e:
+                if e.status_code == 404:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"No recent trading data available for stock {stock_code}"
+                    )
+                raise e
+
+        stock_breakdown = {}
+        portfolio_cash_flows = []
+        portfolio_dates = []
+        
+        # Calculate returns for each stock and prepare portfolio-level data
+        for stock_code, transactions in stock_transactions.items():
+            sorted_txs = sorted(transactions, key=lambda x: x.transaction_date)
+            latest_price = latest_prices[stock_code]
+            
+            # Calculate individual stock TWR
+            holding_period_returns = []
+            current_holdings = 0
+            last_value = 0
+
+            for tx in sorted_txs:
+                if tx.transaction_type == "buy":
+                    if current_holdings > 0:
+                        period_return = (tx.price_per_share * current_holdings - last_value) / last_value
+                        holding_period_returns.append(1 + period_return)
+                    
+                    current_holdings += tx.quantity
+                    last_value = tx.total_value
+                else:  # sell
+                    if current_holdings == 0:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Invalid transaction sequence for {stock_code}: selling with no holdings"
+                        )
+                    
+                    period_return = (tx.price_per_share * current_holdings - last_value) / last_value
+                    holding_period_returns.append(1 + period_return)
+                    
+                    current_holdings -= tx.quantity
+                    if current_holdings > 0:
+                        last_value = current_holdings * tx.price_per_share
+
+            # Calculate final period return using latest market price if we still have holdings
+            if current_holdings > 0:
+                final_value = current_holdings * latest_price
+                final_return = (final_value - last_value) / last_value
+                holding_period_returns.append(1 + final_return)
+
+            stock_twr = np.prod(holding_period_returns) - 1 if holding_period_returns else 0
+
+            # Calculate individual stock MWR
+            stock_cash_flows = []
+            current_holdings = 0
+            stock_dates = []
+            
+            for tx in sorted_txs:
+                if tx.transaction_type == "buy":
+                    stock_cash_flows.append(-tx.total_value)
+                    current_holdings += tx.quantity
+                else:
+                    stock_cash_flows.append(tx.total_value)
+                    current_holdings -= tx.quantity
+                
+                # Convert transaction date to datetime
+                tx_date = datetime.combine(
+                    tx.transaction_date.date() if isinstance(tx.transaction_date, datetime)
+                    else tx.transaction_date,
+                    datetime.min.time()
+                )
+                stock_dates.append(tx_date)
+                portfolio_dates.append(tx_date)
+                portfolio_cash_flows.append(-tx.total_value if tx.transaction_type == "buy" else tx.total_value)
+
+            # Add final market value if we still have holdings
+            if current_holdings > 0:
+                final_value = current_holdings * latest_price
+                stock_cash_flows.append(final_value)
+                latest_dt = latest_dates[stock_code]
+                stock_dates.append(latest_dt)
+                portfolio_dates.append(latest_dt)
+                portfolio_cash_flows.append(final_value)
+
+            # Calculate stock MWR
+            try:
+                start_date = stock_dates[0]
+                days = [(date - start_date).days for date in stock_dates]
+                
+                daily_irr = npf.irr(stock_cash_flows)
+                
+                if daily_irr is None or np.isnan(daily_irr):
+                    logger.warning(f"Invalid IRR calculated for {stock_code}")
+                    stock_mwr = 0
+                else:
+                    total_days = max(1, days[-1])
+                    stock_mwr = (1 + daily_irr) ** (365 / total_days) - 1
+            except Exception as e:
+                logger.error(f"Error calculating MWR for {stock_code}: {str(e)}")
+                stock_mwr = 0
+
+            stock_breakdown[stock_code] = {
+                "twr": round(float(stock_twr), 4),
+                "mwr": round(float(stock_mwr), 4)
+            }
+
+        # Calculate portfolio-level MWR
+        try:
+            start_date = min(portfolio_dates)
+            days = [(date - start_date).days for date in portfolio_dates]
+            
+            daily_irr = npf.irr(portfolio_cash_flows)
+            
+            if daily_irr is None or np.isnan(daily_irr):
+                logger.warning("Invalid portfolio IRR calculated")
+                portfolio_mwr = 0
+            else:
+                total_days = max(1, days[-1])
+                portfolio_mwr = (1 + daily_irr) ** (365 / total_days) - 1
+        except Exception as e:
+            logger.error(f"Error calculating portfolio MWR: {str(e)}")
+            portfolio_mwr = 0
+
+        # For portfolio TWR, use a value-weighted approach
+        total_investment = sum(abs(cf) for cf in portfolio_cash_flows if cf < 0)
+        portfolio_twr = 0
+        
+        for stock_code, transactions in stock_transactions.items():
+            stock_investment = sum(tx.total_value for tx in transactions if tx.transaction_type == "buy")
+            weight = stock_investment / total_investment
+            portfolio_twr += weight * stock_breakdown[stock_code]["twr"]
+
+        # Get overall date range from portfolio dates (which are now all in datetime format)
+        start_date = min(portfolio_dates)
+        end_date = max(latest_dates.values())
+
+        return PortfolioReturnResponse(
+            portfolio_twr=round(float(portfolio_twr), 4),
+            portfolio_mwr=round(float(portfolio_mwr), 4),
+            calculation_date=datetime.now(timezone.utc),
+            start_date=start_date,
+            end_date=end_date,
+            stock_breakdown=stock_breakdown
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error calculating portfolio returns: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error calculating portfolio returns: {str(e)}"
+        )
+    
