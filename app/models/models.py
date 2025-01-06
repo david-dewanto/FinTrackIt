@@ -2,7 +2,7 @@ from sqlalchemy import Column, String, Date
 from sqlalchemy.sql import func
 import uuid
 from ..db.database import Base
-from sqlalchemy import Column, String, DateTime, Integer, PrimaryKeyConstraint, BigInteger
+from sqlalchemy import Column, String, DateTime, Integer, PrimaryKeyConstraint, BigInteger,Float
 
 class APIKey(Base):
     __tablename__ = "api_keys"
@@ -25,3 +25,12 @@ class StockPrice(Base):
     volume_thousands = Column(BigInteger) 
 
     __table_args__ = (PrimaryKeyConstraint('symbol', 'date'),)
+
+class SharpeRatioCache(Base):
+    __tablename__ = "sharpe_ratio_cache"
+    
+    stock_code = Column(String, primary_key=True)
+    sharpe_ratio = Column(Float)
+    avg_annual_return = Column(Float)
+    return_volatility = Column(Float)
+    last_updated = Column(DateTime(timezone=True), server_default=func.now())

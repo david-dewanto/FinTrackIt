@@ -3,14 +3,20 @@
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from typing import Optional
 import subprocess
-from .schemas import EmailRequest, EmailResponse, StockPriceData, StockPriceResponse
+from .schemas import (
+    EmailRequest, EmailResponse, 
+    StockPriceData, StockPriceResponse,
+    SharpeRatioResponse  # Added new schemas
+)
 from sqlalchemy.orm import Session 
-from datetime import date 
+from datetime import datetime, timezone, timedelta, date
 from ...db.database import get_db
 import logging
 import yfinance as yf
 from sqlalchemy import and_
 from ...models.models import StockPrice
+import numpy as np  # Added for financial calculations
+from ...models.models import SharpeRatioCache  
 
 router = APIRouter()
 logging.basicConfig(level=logging.INFO)
@@ -165,4 +171,106 @@ async def get_stock_price(
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
+        )
+
+@router.get("/sharpe-ratio/{stock_code}", response_model=SharpeRatioResponse, tags=["Analysis"])
+async def calculate_sharpe_ratio(
+    stock_code: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Calculate the Sharpe Ratio for a given stock over a 3-year period.
+    Uses a risk-free rate of 5.5%. Results are cached and updated weekly.
+    """
+    try:
+        # Check cache first
+        cached_data = db.query(SharpeRatioCache).filter(
+            SharpeRatioCache.stock_code == stock_code
+        ).first()
+
+        current_time = datetime.now(timezone.utc)
+        
+        # If cache exists and is less than 7 days old, use it
+        if cached_data and (current_time - cached_data.last_updated) < timedelta(days=7):
+            return SharpeRatioResponse(
+                stock_code=stock_code,
+                sharpe_ratio=cached_data.sharpe_ratio,
+                avg_annual_return=cached_data.avg_annual_return,
+                return_volatility=cached_data.return_volatility,
+                risk_free_rate=0.055
+            )
+
+        # Calculate new values if cache doesn't exist or is old
+        end_date = date.today()
+        start_date = end_date - timedelta(days=3*365)  # 3 years
+        
+        stock_code_jk = f"{stock_code}.JK"
+        risk_free_rate = 0.055  # 5.5%
+        
+        # Fetch stock data
+        stock = yf.Ticker(stock_code_jk)
+        hist = stock.history(start=start_date, end=end_date)
+        
+        if hist.empty:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No data found for stock {stock_code} in the specified date range"
+            )
+            
+        # Calculate daily returns
+        daily_returns = hist['Close'].pct_change().dropna()
+        
+        if len(daily_returns) < 252:  # Minimum 1 year of trading days
+            raise HTTPException(
+                status_code=400,
+                detail="Insufficient data for Sharpe ratio calculation"
+            )
+            
+        # Calculate metrics
+        avg_daily_return = daily_returns.mean()
+        daily_volatility = daily_returns.std()
+        
+        # Annualize metrics
+        avg_annual_return = ((1 + avg_daily_return) ** 252) - 1
+        annual_volatility = daily_volatility * np.sqrt(252)
+        
+        # Calculate Sharpe ratio
+        excess_return = avg_annual_return - risk_free_rate
+        sharpe_ratio = excess_return / annual_volatility if annual_volatility != 0 else 0
+
+        # Round the values
+        sharpe_ratio_rounded = float(round(sharpe_ratio, 4))
+        avg_annual_return_rounded = float(round(avg_annual_return, 4))
+        annual_volatility_rounded = float(round(annual_volatility, 4))
+
+        # Update cache
+        cache_entry = SharpeRatioCache(
+            stock_code=stock_code,
+            sharpe_ratio=sharpe_ratio_rounded,
+            avg_annual_return=avg_annual_return_rounded,
+            return_volatility=annual_volatility_rounded,
+            last_updated=current_time
+        )
+
+        db.merge(cache_entry)  # Use merge instead of add to handle both insert and update
+        db.commit()
+        
+        return SharpeRatioResponse(
+            stock_code=stock_code,
+            sharpe_ratio=sharpe_ratio_rounded,
+            avg_annual_return=avg_annual_return_rounded,
+            return_volatility=annual_volatility_rounded,
+            risk_free_rate=risk_free_rate
+        )
+
+    except Exception as e:
+        if "rate limit" in str(e).lower():
+            raise HTTPException(
+                status_code=429,
+                detail="API rate limit reached. Please try again later."
+            )
+        logger.error(f"Error calculating Sharpe ratio: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error calculating Sharpe ratio: {str(e)}"
         )
