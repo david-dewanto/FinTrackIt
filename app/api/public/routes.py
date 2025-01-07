@@ -135,7 +135,7 @@ async def get_company_info(symbol: str, db: Session = Depends(get_db)):
 
         # Check if we have cached data less than 1 day old
         utc_now = datetime.now(pytz.UTC)
-        oldest_allowed_date = utc_now - timedelta(days=1)
+        oldest_allowed_date = utc_now - timedelta(days=7)
         
         # Try to get company from cache
         company_info = db.query(CompanyInfo).filter(CompanyInfo.symbol == symbol).first()
