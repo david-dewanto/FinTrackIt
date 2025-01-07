@@ -51,3 +51,14 @@ class Transaction(Base):
     price_per_share = Column(Integer, nullable=False)
     total_value = Column(Integer, nullable=False)
     transaction_date = Column(DateTime(timezone=True), nullable=False)
+
+class CompanyInfo(Base):
+    __tablename__ = "company_info"
+    
+    symbol = Column(String, primary_key=True)  
+    company_name = Column(String)
+    sector = Column(String, nullable=True)
+    industry = Column(String, nullable=True)
+    market_cap = Column(BigInteger, nullable=True)
+    description = Column(String, nullable=True)
+    last_updated = Column(DateTime(timezone=True), server_default=func.now())
