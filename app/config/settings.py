@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     
     SMTP_HOST: str = "localhost"  
     SMTP_PORT: int = 25  
-    SMTP_FROM_EMAIL: str = "noreply@fintrackit.my.id"
+    SMTP_FROM_EMAIL: str = "no-reply@mail.fintrackit.my.id"
 
     class Config:
         env_file = ".env"

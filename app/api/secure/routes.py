@@ -40,6 +40,30 @@ logger = logging.getLogger(__name__)
 async def secure_route(authorization: Optional[str] = Header(None)):
     return {"message": "This is a secure endpoint"}
 
+def send_secure_email(recipient: str, subject: str, body: str) -> bool:
+    """
+    Send email using SMTP directly instead of shell commands.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        # Create message
+        message = MIMEMultipart()
+        message["From"] = "no-reply@mail.fintrackit.my.id"
+        message["To"] = recipient
+        message["Subject"] = subject
+
+        # Add HTML body
+        message.attach(MIMEText(body, "html"))
+
+        # Connect to local SMTP server (Postfix)
+        with smtplib.SMTP('localhost') as server:
+            server.send_message(message)
+            
+        return True
+    except Exception as e:
+        logger.error(f"SMTP error: {str(e)}")
+        return False
+
 @router.post("/send-email", response_model=EmailResponse, tags=["Email"])
 def send_email(
     email_data: EmailRequest,
@@ -47,51 +71,32 @@ def send_email(
     request: Request = None
 ) -> EmailResponse:
     """
-    Send an email using the local Postfix server.
+    Send an email using direct SMTP connection.
     Requires authentication.
     """
-    try:        
-        # Construct the mail command
-        mail_command = [
-            'mail',
-            '-s', email_data.subject,
-            '-a', 'From: noreply@fintrackit.my.id',
-            '-a', 'Content-Type: text/html',
-            email_data.recipient_email
-        ]
-        
-        # Execute the mail command
-        process = subprocess.Popen(
-            mail_command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
+    try:
+        success = send_secure_email(
+            recipient=email_data.recipient_email,
+            subject=email_data.subject,
+            body=email_data.body
         )
         
-        # Send the email body and get the output
-        stdout, stderr = process.communicate(input=email_data.body)
-        
-        # Check if the command was successful
-        if process.returncode == 0:
+        if success:
             return EmailResponse(
                 success=True,
                 message="Email sent successfully"
             )
         else:
-            error_msg = f"Failed to send email: {stderr}"
-            logger.error(error_msg)
             raise HTTPException(
                 status_code=500,
-                detail=error_msg
+                detail="Failed to send email"
             )
             
     except Exception as e:
-        error_msg = f"Error sending email: {str(e)}"
-        logger.error(error_msg)
+        logger.error(f"Email service error: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=error_msg
+            detail="Failed to send email"
         )
 
 @router.get("/stock-price/{stock_code}/{date_range}", response_model=StockPriceResponse)
