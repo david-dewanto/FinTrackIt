@@ -17,6 +17,7 @@ from .schemas import (
     PortfolioReturnRequest,
     ReturnCalculationTransaction
 )
+import socket
 from sqlalchemy.orm import Session 
 from datetime import datetime, timezone, timedelta, date
 from ...db.database import get_db
@@ -26,78 +27,77 @@ from sqlalchemy import and_
 from ...models.models import StockPrice, SharpeRatioCache
 import numpy as np
 from scipy.optimize import minimize
-from .schemas import (
-    TWRRequest, TWRResponse,
-    MWRRequest, MWRResponse
-)
 import numpy_financial as npf
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import smtplib
 
 router = APIRouter()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 @router.get("/")
-async def secure_route(authorization: Optional[str] = Header(None)):
+async def secure_route():
     return {"message": "This is a secure endpoint"}
 
-def send_secure_email(recipient: str, subject: str, body: str) -> bool:
+@router.post("/send-email", response_model=EmailResponse, tags=["Email"])
+async def send_secure_email(request: EmailRequest):
     """
-    Send email using SMTP directly instead of shell commands.
-    Returns True if successful, False otherwise.
+    Send email using SMTP with TLS support.
+    Returns EmailResponse with success status and message.
     """
-    try:
+    try:        
         # Create message
         message = MIMEMultipart()
         message["From"] = "no-reply@mail.fintrackit.my.id"
-        message["To"] = recipient
-        message["Subject"] = subject
-
-        # Add HTML body
-        message.attach(MIMEText(body, "html"))
-
-        # Connect to local SMTP server (Postfix)
-        with smtplib.SMTP('localhost') as server:
-            server.send_message(message)
-            
-        return True
-    except Exception as e:
-        logger.error(f"SMTP error: {str(e)}")
-        return False
-
-@router.post("/send-email", response_model=EmailResponse, tags=["Email"])
-def send_email(
-    email_data: EmailRequest,
-    db: Session = Depends(get_db),
-    request: Request = None
-) -> EmailResponse:
-    """
-    Send an email using direct SMTP connection.
-    Requires authentication.
-    """
-    try:
-        success = send_secure_email(
-            recipient=email_data.recipient_email,
-            subject=email_data.subject,
-            body=email_data.body
-        )
+        message["To"] = request.recipient_email
+        message["Subject"] = request.subject
+        message.attach(MIMEText(request.body, "html"))
         
-        if success:
-            return EmailResponse(
-                success=True,
-                message="Email sent successfully"
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to send email"
-            )
-            
-    except Exception as e:
-        logger.error(f"Email service error: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to send email"
+        # Try different host configurations
+        hosts_to_try = [
+            ('172.17.0.1', 25),
+            ('localhost', 25),
+            ('127.0.0.1', 25)
+        ]
+        
+        for host, port in hosts_to_try:            
+            try:
+                # Create SMTP connection with extended timeout
+                with smtplib.SMTP(host, port, timeout=30) as server:
+                    server.set_debuglevel(1)
+                    
+                    # Identify ourselves to SMTP server
+                    server.ehlo("mail.fintrackit.my.id")
+                    
+                    # Start TLS encryption
+                    server.starttls()
+                    
+                    # Send EHLO again after TLS
+                    server.ehlo("mail.fintrackit.my.id")
+                    
+                    # Try sending the message
+                    server.send_message(message)
+                    return EmailResponse(success=True, message="Email sent successfully")
+                    
+            except smtplib.SMTPException as e:
+                logger.error(f"SMTP error with {host}: {str(e)}")
+                continue
+            except Exception as e:
+                logger.error(f"Error trying {host}: {str(e)}")
+                continue
+        
+        # If we get here, all connection attempts failed
+        return EmailResponse(
+            success=False, 
+            message="Failed to connect to any SMTP server"
         )
+                
+    except Exception as e:
+        logger.error(f"General error in send_secure_email: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return EmailResponse(success=False, message=f"Failed to send email: {str(e)}")
 
 @router.get("/stock-price/{stock_code}/{date_range}", response_model=StockPriceResponse)
 async def get_stock_price(
@@ -106,16 +106,32 @@ async def get_stock_price(
     db: Session = Depends(get_db)
 ):
     try:
-        # Parse date range (assuming format: YYYY-MM-DD_YYYY-MM-DD)
-        start_date = date.fromisoformat(date_range.split("_")[0])
-        end_date = date.fromisoformat(date_range.split("_")[1])
+        # Add debug logging
+        date_parts = date_range.split("_")
         
-        # For single-day queries, adjust end_date to include the next day
-        # This ensures yfinance returns data for the requested date
-        is_single_day = start_date == end_date
-        yf_end_date = end_date + timedelta(days=1) if is_single_day else end_date
+        # Parse date range with extra validation
+        if len(date_parts) != 2:
+            raise ValueError("Date range must contain exactly two dates separated by underscore")
+            
+        start_date_str = date_parts[0]
+        end_date_str = date_parts[1]
+        
+        try:
+            start_date = date.fromisoformat(start_date_str)
+            end_date = date.fromisoformat(end_date_str)
+        except ValueError as e:
+            logger.error(f"Date parsing error: {str(e)}")
+            raise ValueError(f"Invalid date format. Dates must be in YYYY-MM-DD format. Got start={start_date_str}, end={end_date_str}")
                 
         stock_code = f"{stock_code}.JK"
+
+        # Generate list of expected trading days (excluding weekends)
+        trading_days = set()
+        current_date = start_date
+        while current_date <= end_date:
+            if current_date.weekday() < 5:  # Skip weekends
+                trading_days.add(current_date)
+            current_date += timedelta(days=1)
 
         # Check cache first
         cached_prices = db.query(StockPrice).filter(
@@ -126,78 +142,106 @@ async def get_stock_price(
             )
         ).all()
 
-        # If all dates are cached, return cached data
-        expected_days = (end_date - start_date).days + 1
-        if cached_prices and len(cached_prices) == expected_days:
+        # Convert cached dates to a set for comparison
+        cached_dates = {price.date.date() if isinstance(price.date, datetime) else price.date 
+                       for price in cached_prices}
+
+        # If we have all trading days in cache, return cached data
+        if cached_dates >= trading_days:
+            logger.info("Using cached data - all trading days found in cache")
             prices = [
                 StockPriceData(
-                    date=price.date,
+                    date=price.date.date() if isinstance(price.date, datetime) else price.date,  # Convert to date
                     closing_price=price.closing_price,
                     volume_thousands=price.volume_thousands
-                ) for price in cached_prices
+                ) for price in sorted(cached_prices, key=lambda x: x.date)
             ]
             return StockPriceResponse(symbol=stock_code, prices=prices)
 
-        # Fetch from yfinance
+        # If not fully cached, fetch from YFinance
         try:
             stock = yf.Ticker(stock_code)
-            hist = stock.history(start=start_date, end=yf_end_date)
+            hist = stock.history(start=start_date, end=end_date + timedelta(days=1))
             
-            if hist.empty:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No data found for stock {stock_code} in the specified date range"
-                )
+            if not hist.empty:
+                # Get ALL existing dates for this stock to avoid duplicates
+                existing_prices = db.query(StockPrice).filter(
+                    StockPrice.symbol == stock_code
+                ).all()
+                existing_dates = {price.date.date() if isinstance(price.date, datetime) else price.date 
+                                for price in existing_prices}
 
-            # Prepare data for response and caching
-            prices = []
-            for entry_date, row in hist.iterrows():
-                # Skip data beyond the requested end_date for single-day queries
-                if is_single_day and entry_date.date() > end_date:
-                    continue
-                    
-                price_data = StockPriceData(
-                    date=entry_date,
-                    closing_price=int(row['Close']),
-                    volume_thousands=int(row['Volume'] // 1000)
-                )
-                prices.append(price_data)
+                # Only insert dates that don't exist
+                new_prices = []
+                for entry_date, row in hist.iterrows():
+                    # Convert entry_date to date object
+                    entry_date = entry_date.date()                    
+                    # Check if this date exists
+                    if entry_date not in existing_dates:
+                        db_price = StockPrice(
+                            symbol=stock_code,
+                            date=entry_date,
+                            closing_price=int(row['Close']),
+                            volume_thousands=int(row['Volume'] // 1000)
+                        )
+                        new_prices.append(db_price)
 
-                # Cache the data
-                db_price = StockPrice(
-                    symbol=stock_code,
-                    date=entry_date,
-                    closing_price=int(row['Close']),
-                    volume_thousands=int(row['Volume'] // 1000)
-                )
-
-                db.merge(db_price)
-
-            db.commit()
-            
-            if not prices:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"No data found for stock {stock_code} on {start_date}"
-                )
-                
-            return StockPriceResponse(symbol=stock_code, prices=prices)
+                if new_prices:
+                    try:
+                        db.bulk_save_objects(new_prices)
+                        db.commit()
+                    except Exception as e:
+                        db.rollback()
+                        logger.error(f"Error committing to database: {str(e)}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Error saving to database: {str(e)}"
+                        )
 
         except Exception as e:
             if "rate limit" in str(e).lower():
+                logger.warning("YFinance rate limit reached")
                 raise HTTPException(
                     status_code=429,
-                    detail="API rate limit reached. Please try again later or consider using a different time interval."
+                    detail="API rate limit reached. Please try again later."
                 )
+            logger.error(f"YFinance error: {str(e)}")
             raise HTTPException(
                 status_code=500,
                 detail=f"Error fetching data from YFinance: {str(e)}"
             )
 
+        # Return all prices for the requested range
+        all_prices = db.query(StockPrice).filter(
+            and_(
+                StockPrice.symbol == stock_code,
+                StockPrice.date >= start_date,
+                StockPrice.date <= end_date
+            )
+        ).order_by(StockPrice.date).all()
+        
+        if not all_prices:
+            logger.warning(f"No data found for {stock_code} in date range")
+            raise HTTPException(
+                status_code=404,
+                detail=f"No data found for stock {stock_code} in the specified date range"
+            )
+            
+        prices = [
+            StockPriceData(
+                date=price.date.date() if isinstance(price.date, datetime) else price.date,  # Convert to date
+                closing_price=price.closing_price,
+                volume_thousands=price.volume_thousands
+            ) for price in all_prices
+        ]
+        
+        return StockPriceResponse(symbol=stock_code, prices=prices)
+
     except ValueError as e:
+        logger.error(f"Value error in get_stock_price: {str(e)}")
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid date format. Please use YYYY-MM-DD_YYYY-MM-DD format"
+            detail=f"Invalid date format. Please use YYYY-MM-DD_YYYY-MM-DD format. Error: {str(e)}"
         )
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
@@ -827,4 +871,3 @@ async def calculate_portfolio_returns(
             status_code=500,
             detail=f"Error calculating portfolio returns: {str(e)}"
         )
-    

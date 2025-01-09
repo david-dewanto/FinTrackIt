@@ -1,6 +1,7 @@
-from pydantic import BaseModel, EmailStr
-from datetime import date, datetime
 from typing import List, Optional, Dict
+from datetime import datetime, date
+from pydantic import BaseModel, EmailStr
+from pydantic.config import ConfigDict
 from enum import Enum
 
 class EmailRequest(BaseModel):
@@ -16,20 +17,14 @@ class StockPriceData(BaseModel):
     date: date  # Changed from datetime to date
     closing_price: int
     volume_thousands: int
-
-    class Config:
-        from_attributes = True
-        json_encoders = {
-            date: lambda v: v.strftime("%Y-%m-%d")  
-        }
+    
+    model_config = ConfigDict(from_attributes=True)
 
 class StockPriceResponse(BaseModel):
     symbol: str
     prices: List[StockPriceData]
-
-    class Config:
-        from_attributes = True
-
+    
+    model_config = ConfigDict(from_attributes=True)
 
 class SharpeRatioResponse(BaseModel):
     stock_code: str

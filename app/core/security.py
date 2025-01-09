@@ -70,10 +70,17 @@ async def verify_access(
             status_code=403,
             detail="Access to internal routes requires internal API key"
         )
-
+    
     # For secure routes, try JWT first
     if "/v1/secure/" in path:
         # If valid JWT token exists, allow access
+
+        if not token and (not api_key or api_key != settings.INTERNAL_API_KEY):
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required. Please provide a valid token."
+            )
+
         if token:
             try:
                 verify_jwt_token(token)
@@ -86,12 +93,16 @@ async def verify_access(
             except JWTError:
                 raise HTTPException(
                     status_code=401,
-                    detail="Invalid token"
+                    detail="Invalid server to server token, please request another token at /v1/auth/token"
                 )
 
         # If no token or invalid token, fallback to API key verification
-        if api_key:
-            return await verify_api_key(api_key, db)
+        if api_key != settings.INTERNAL_API_KEY:
+            raise HTTPException(
+                status_code=403,
+                detail="Invalid authentication method"
+            )
+        return True
     
     # Auth routes - only need API key to get token
     if "/v1/auth/" in path:

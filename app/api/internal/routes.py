@@ -334,7 +334,7 @@ async def create_transaction(
             decoded_token = auth.verify_id_token(transaction.token)
             uid = decoded_token['uid']
         except Exception as e:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            raise HTTPException(status_code=401, detail="Invalid account token, please login again")
 
         # Convert transaction date to date for stock price query
         transaction_date = transaction.transaction_date.date()
@@ -389,7 +389,7 @@ async def get_transactions(
             decoded_token = auth.verify_id_token(request.token)
             uid = decoded_token['uid']
         except Exception as e:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            raise HTTPException(status_code=401, detail="Invalid account token, please login again")
 
         # Get user's transactions
         transactions = db.query(Transaction).filter(Transaction.uid == uid).all()
@@ -413,7 +413,7 @@ async def delete_transaction(
             decoded_token = auth.verify_id_token(request.token)
             uid = decoded_token['uid']
         except Exception as e:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            raise HTTPException(status_code=401, detail="Invalid account token, please login again")
 
         # Get transaction
         transaction = db.query(Transaction).filter(

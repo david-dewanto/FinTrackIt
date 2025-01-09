@@ -27,7 +27,7 @@ async def check_public_rate_limit(request: Request):
     if is_limited:
         raise HTTPException(
             status_code=429,
-            detail="Rate limit exceeded. Please try again later."
+            detail="Rate limit exceeded. Please try again later. (150 request / hour for Public Endpoints)"
         )
 
 # Rate limiter dependency for secure routes
@@ -36,7 +36,7 @@ async def check_secure_rate_limit(request: Request):
     if is_limited:
         raise HTTPException(
             status_code=429,
-            detail="Rate limit exceeded. Please try again later."
+            detail="Rate limit exceeded. Please try again later. (75 request / hour for Secure Endpoints)"
         )
 
 # Include routers with dependencies
@@ -61,7 +61,7 @@ app.include_router(
     internal_routes.router, 
     prefix="/v1/internal", 
     tags=["internal"],
-    dependencies=[Depends(verify_access)]  # No rate limit for internal routes
+    dependencies=[Depends(verify_access)] 
 )
 
 @app.on_event("shutdown")
