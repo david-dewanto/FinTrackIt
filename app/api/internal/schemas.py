@@ -92,3 +92,37 @@ class TransactionResponse(BaseModel):
 
 class TransactionListResponse(BaseModel):
     transactions: List[TransactionResponse]
+
+class PriceTriggerType(str, Enum):
+    ABOVE = "above"
+    BELOW = "below"
+
+class StockAlertCreate(BaseModel):
+    token: str
+    stock_code: str
+    trigger_price: int
+    trigger_type: PriceTriggerType
+    notification_hour: int  # 0-23 hour in UTC
+    is_repeating: bool
+
+class StockAlertResponse(BaseModel):
+    id: str
+    stock_code: str
+    trigger_price: int
+    trigger_type: PriceTriggerType
+    notification_hour: int
+    is_repeating: bool
+    is_active: bool
+    last_notified: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class StockAlertList(BaseModel):
+    token: str
+
+class StockAlertListResponse(BaseModel):
+    alerts: List[StockAlertResponse]
+
+class StockAlertDelete(BaseModel):
+    token: str

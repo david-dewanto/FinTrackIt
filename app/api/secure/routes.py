@@ -1,8 +1,7 @@
 # app/api/secure/routes.py
 
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
-from typing import Optional, List, Dict
-import subprocess
+from fastapi import APIRouter, Depends, HTTPException
+from typing import List, Dict
 from .schemas import (
     EmailRequest, EmailResponse, 
     StockPriceData, StockPriceResponse,
@@ -17,7 +16,6 @@ from .schemas import (
     PortfolioReturnRequest,
     ReturnCalculationTransaction
 )
-import socket
 from sqlalchemy.orm import Session 
 from datetime import datetime, timezone, timedelta, date
 from ...db.database import get_db
@@ -148,7 +146,6 @@ async def get_stock_price(
 
         # If we have all trading days in cache, return cached data
         if cached_dates >= trading_days:
-            logger.info("Using cached data - all trading days found in cache")
             prices = [
                 StockPriceData(
                     date=price.date.date() if isinstance(price.date, datetime) else price.date,  # Convert to date
@@ -677,30 +674,37 @@ async def calculate_portfolio_returns(
     db: Session = Depends(get_db)
 ):
     """
-    Calculate both TWR and MWR for the entire portfolio, including individual stock breakdowns.
-    Uses latest market prices for current holdings.
+    Calculate portfolio-level TWR and MWR.
+    
+    TWR (Time-Weighted Return):
+    - Eliminates the impact of cash flows
+    - Each holding period return is weighted equally
+    - Uses geometric linking of returns
+    
+    MWR (Money-Weighted Return):
+    - Internal Rate of Return (IRR) calculation
+    - Considers timing and size of cash flows
+    - Uses iterative solver for better numerical stability 
     """
     try:
         if not request.transactions:
-            raise HTTPException(
-                status_code=400,
-                detail="No transactions provided"
-            )
+            raise HTTPException(status_code=400, detail="No transactions provided")
 
-        # Group transactions by stock code
+        # Group transactions by stock code to get latest prices
         stock_transactions: Dict[str, List[ReturnCalculationTransaction]] = {}
         for tx in request.transactions:
             if tx.stock_code not in stock_transactions:
                 stock_transactions[tx.stock_code] = []
             stock_transactions[tx.stock_code].append(tx)
 
-        # Get latest prices for all stocks - look back up to 7 days to handle holidays
-        today = date.today()
-        week_ago = today - timedelta(days=7)
+        # Get latest prices for all stocks
+        today = datetime.now(timezone.utc).date()
+        week_ago = (today - timedelta(days=7))
         date_range = f"{week_ago.isoformat()}_{today.isoformat()}"
         
         latest_prices = {}
         latest_dates = {}
+        
         for stock_code in stock_transactions.keys():
             try:
                 latest_price_data = await get_stock_price(stock_code, date_range, db)
@@ -710,13 +714,8 @@ async def calculate_portfolio_returns(
                         detail=f"Could not fetch latest price for stock {stock_code}"
                     )
                 
-                # Get the most recent price from available data
                 latest_prices[stock_code] = latest_price_data.prices[-1].closing_price
-                latest_dates[stock_code] = datetime.combine(
-                    latest_price_data.prices[-1].date.date() if isinstance(latest_price_data.prices[-1].date, datetime)
-                    else latest_price_data.prices[-1].date,
-                    datetime.min.time()
-                )
+                latest_dates[stock_code] = latest_price_data.prices[-1].date
                 
             except HTTPException as e:
                 if e.status_code == 404:
@@ -726,145 +725,197 @@ async def calculate_portfolio_returns(
                     )
                 raise e
 
-        stock_breakdown = {}
+        # Calculate portfolio TWR by weighting individual stock returns
+        total_investment = 0
+        weighted_twr = 0
         portfolio_cash_flows = []
         portfolio_dates = []
-        
-        # Calculate returns for each stock and prepare portfolio-level data
-        for stock_code, transactions in stock_transactions.items():
+
+        def calculate_twr(transactions, latest_price):
+            """
+            Calculate Time-Weighted Return using geometric linking of holding period returns.
+            Handles multiple transactions on same date.
+            """
+            if not transactions:
+                return 0.0
+                
+            # Sort transactions chronologically
             sorted_txs = sorted(transactions, key=lambda x: x.transaction_date)
+            
+            # Group transactions by date
+            from collections import defaultdict
+            date_groups = defaultdict(list)
+            for tx in sorted_txs:
+                date_groups[tx.transaction_date].append(tx)
+            
+            # Process each date's transactions
+            holding_period_returns = []
+            current_shares = 0
+            last_price = None
+            last_date = None
+            
+            for date, txs in sorted(date_groups.items()):
+                day_shares = current_shares
+                day_value = day_shares * last_price if last_price else 0
+                
+                # Process all transactions for the day
+                for tx in txs:
+                    if tx.transaction_type == "buy":
+                        day_value += tx.total_value
+                        day_shares += tx.quantity
+                    else:  # sell
+                        day_value -= tx.total_value
+                        day_shares -= tx.quantity
+                
+                # Calculate day's ending price (weighted average)
+                if day_shares > 0:
+                    day_price = day_value / day_shares
+                else:
+                    day_price = txs[-1].price_per_share
+                
+                # Calculate return for the period if we had shares
+                if current_shares > 0 and last_price is not None:
+                    r = (day_price / last_price) - 1
+                    holding_period_returns.append(1 + r)
+                
+                current_shares = day_shares
+                last_price = day_price
+                last_date = date
+            
+            # Add final period return if we still have shares
+            if current_shares > 0 and last_price is not None:
+                final_return = (latest_price / last_price) - 1
+                holding_period_returns.append(1 + final_return)
+            
+            # Calculate cumulative TWR using geometric linking
+            if holding_period_returns:
+                cumulative_twr = np.prod(holding_period_returns) - 1
+                return float(cumulative_twr)
+            return 0.0
+
+        def calculate_mwr(transactions, end_date):
+            """
+            Calculate Money-Weighted Return (IRR) using robust numerical methods.
+            """
+            if not transactions:
+                return 0.0
+                
+            sorted_txs = sorted(transactions, key=lambda x: x.transaction_date)
+            
+            # Prepare cash flows and dates for IRR calculation
+            cash_flows = []
+            dates = []
+            
+            for tx in sorted_txs:
+                if tx.transaction_type == "buy":
+                    cash_flows.append(-tx.total_value)
+                else:  # sell
+                    cash_flows.append(tx.total_value)
+                dates.append(tx.transaction_date)
+            
+            if len(cash_flows) < 2:
+                return 0.0
+                
+            # Convert dates to year fractions
+            start_date = dates[0]
+            year_fractions = [(d - start_date).total_seconds() / (365.25 * 24 * 60 * 60) 
+                            for d in dates]
+            
+            # NPV calculation helper
+            def npv(rate, cash_flows, year_fractions):
+                return sum(cf / (1 + rate) ** t 
+                        for cf, t in zip(cash_flows, year_fractions))
+            
+            # Use secant method for more reliable IRR calculation
+            def secant_method(f, x0, x1, iterations=100, tolerance=1e-6):
+                for _ in range(iterations):
+                    fx0 = f(x0)
+                    fx1 = f(x1)
+                    if abs(fx1) < tolerance:
+                        return x1
+                    if fx0 == fx1:
+                        break
+                    x_new = x1 - fx1 * (x1 - x0) / (fx1 - fx0)
+                    x0, x1 = x1, x_new
+                return x1
+
+            try:
+                # Find IRR using secant method
+                irr = secant_method(
+                    lambda r: npv(r, cash_flows, year_fractions),
+                    0.0,  # Initial guess 1
+                    0.1   # Initial guess 2
+                )
+                return float(max(min(irr, 10), -0.99))  # Bound the result
+            except:
+                return 0.0
+
+        # Calculate portfolio level returns
+        for stock_code, transactions in stock_transactions.items():
             latest_price = latest_prices[stock_code]
             
-            # Calculate individual stock TWR
-            holding_period_returns = []
-            current_holdings = 0
-            last_value = 0
-
-            for tx in sorted_txs:
-                if tx.transaction_type == "buy":
-                    if current_holdings > 0:
-                        period_return = (tx.price_per_share * current_holdings - last_value) / last_value
-                        holding_period_returns.append(1 + period_return)
-                    
-                    current_holdings += tx.quantity
-                    last_value = tx.total_value
-                else:  # sell
-                    if current_holdings == 0:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Invalid transaction sequence for {stock_code}: selling with no holdings"
-                        )
-                    
-                    period_return = (tx.price_per_share * current_holdings - last_value) / last_value
-                    holding_period_returns.append(1 + period_return)
-                    
-                    current_holdings -= tx.quantity
-                    if current_holdings > 0:
-                        last_value = current_holdings * tx.price_per_share
-
-            # Calculate final period return using latest market price if we still have holdings
-            if current_holdings > 0:
-                final_value = current_holdings * latest_price
-                final_return = (final_value - last_value) / last_value
-                holding_period_returns.append(1 + final_return)
-
-            stock_twr = np.prod(holding_period_returns) - 1 if holding_period_returns else 0
-
-            # Calculate individual stock MWR
-            stock_cash_flows = []
-            current_holdings = 0
-            stock_dates = []
+            # Calculate investment for TWR weighting
+            stock_investment = sum(
+                tx.total_value 
+                for tx in transactions 
+                if tx.transaction_type == "buy"
+            )
+            total_investment += stock_investment
             
-            for tx in sorted_txs:
-                if tx.transaction_type == "buy":
-                    stock_cash_flows.append(-tx.total_value)
-                    current_holdings += tx.quantity
-                else:
-                    stock_cash_flows.append(tx.total_value)
-                    current_holdings -= tx.quantity
-                
-                # Convert transaction date to datetime
-                tx_date = datetime.combine(
-                    tx.transaction_date.date() if isinstance(tx.transaction_date, datetime)
-                    else tx.transaction_date,
-                    datetime.min.time()
+            # Add to weighted TWR
+            stock_twr = calculate_twr(transactions, latest_price)
+            weighted_twr += stock_twr * stock_investment
+            
+            # Collect cash flows for portfolio MWR
+            for tx in transactions:
+                portfolio_cash_flows.append(
+                    -tx.total_value if tx.transaction_type == "buy" else tx.total_value
                 )
-                stock_dates.append(tx_date)
-                portfolio_dates.append(tx_date)
-                portfolio_cash_flows.append(-tx.total_value if tx.transaction_type == "buy" else tx.total_value)
-
-            # Add final market value if we still have holdings
-            if current_holdings > 0:
-                final_value = current_holdings * latest_price
-                stock_cash_flows.append(final_value)
-                latest_dt = latest_dates[stock_code]
-                stock_dates.append(latest_dt)
-                portfolio_dates.append(latest_dt)
+                portfolio_dates.append(tx.transaction_date)
+            
+            # Add final value to portfolio cash flows
+            current_shares = sum(
+                tx.quantity * (1 if tx.transaction_type == "buy" else -1)
+                for tx in transactions
+            )
+            if current_shares > 0:
+                final_value = current_shares * latest_price
                 portfolio_cash_flows.append(final_value)
+                portfolio_dates.append(datetime.combine(
+                    latest_dates[stock_code],
+                    datetime.min.time()
+                ).replace(tzinfo=timezone.utc))
 
-            # Calculate stock MWR
-            try:
-                start_date = stock_dates[0]
-                days = [(date - start_date).days for date in stock_dates]
-                
-                daily_irr = npf.irr(stock_cash_flows)
-                
-                if daily_irr is None or np.isnan(daily_irr):
-                    logger.warning(f"Invalid IRR calculated for {stock_code}")
-                    stock_mwr = 0
-                else:
-                    total_days = max(1, days[-1])
-                    stock_mwr = (1 + daily_irr) ** (365 / total_days) - 1
-            except Exception as e:
-                logger.error(f"Error calculating MWR for {stock_code}: {str(e)}")
-                stock_mwr = 0
-
-            stock_breakdown[stock_code] = {
-                "twr": round(float(stock_twr), 4),
-                "mwr": round(float(stock_mwr), 4)
-            }
-
-        # Calculate portfolio-level MWR
-        try:
-            start_date = min(portfolio_dates)
-            days = [(date - start_date).days for date in portfolio_dates]
-            
-            daily_irr = npf.irr(portfolio_cash_flows)
-            
-            if daily_irr is None or np.isnan(daily_irr):
-                logger.warning("Invalid portfolio IRR calculated")
-                portfolio_mwr = 0
-            else:
-                total_days = max(1, days[-1])
-                portfolio_mwr = (1 + daily_irr) ** (365 / total_days) - 1
-        except Exception as e:
-            logger.error(f"Error calculating portfolio MWR: {str(e)}")
-            portfolio_mwr = 0
-
-        # For portfolio TWR, use a value-weighted approach
-        total_investment = sum(abs(cf) for cf in portfolio_cash_flows if cf < 0)
-        portfolio_twr = 0
-        
-        for stock_code, transactions in stock_transactions.items():
-            stock_investment = sum(tx.total_value for tx in transactions if tx.transaction_type == "buy")
-            weight = stock_investment / total_investment
-            portfolio_twr += weight * stock_breakdown[stock_code]["twr"]
-
-        # Get overall date range from portfolio dates (which are now all in datetime format)
-        start_date = min(portfolio_dates)
-        end_date = max(latest_dates.values())
+        # Calculate final portfolio returns
+        portfolio_twr = weighted_twr / total_investment if total_investment > 0 else 0
+        portfolio_mwr = calculate_mwr(
+            [
+                ReturnCalculationTransaction(
+                    id="portfolio",
+                    uid="portfolio",
+                    stock_code="PORTFOLIO",
+                    transaction_type="buy" if cf < 0 else "sell",
+                    quantity=1,
+                    price_per_share=abs(cf),
+                    total_value=abs(cf),
+                    transaction_date=d
+                )
+                for cf, d in zip(portfolio_cash_flows, portfolio_dates)
+            ],
+            max(portfolio_dates)
+        )
 
         return PortfolioReturnResponse(
             portfolio_twr=round(float(portfolio_twr), 4),
             portfolio_mwr=round(float(portfolio_mwr), 4),
             calculation_date=datetime.now(timezone.utc),
-            start_date=start_date,
-            end_date=end_date,
-            stock_breakdown=stock_breakdown
+            start_date=min(portfolio_dates),
+            end_date=max(latest_dates.values()),
+            stock_breakdown={}  # Empty dict since we no longer calculate individual returns
         )
 
-    except HTTPException:
-        raise
+    except HTTPException as e:
+        raise e
     except Exception as e:
         logger.error(f"Error calculating portfolio returns: {str(e)}")
         raise HTTPException(

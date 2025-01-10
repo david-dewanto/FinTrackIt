@@ -1,5 +1,6 @@
 # app/api/internal/routes.py
-from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi import BackgroundTasks
 from typing import Optional, List
 from sqlalchemy.orm import Session
 from firebase_admin import auth
@@ -13,10 +14,20 @@ from ...core.firebase import get_firebase_admin, sign_in_with_email_password, se
 from ...models.models import APIKey, Transaction
 from ..secure.routes import get_stock_price
 from . import schemas
-from datetime import timedelta
+from ...models.models import StockAlert, PriceTriggerType
+from .schemas import (
+    StockAlertCreate, StockAlertResponse, StockAlertList,
+    StockAlertListResponse, StockAlertDelete
+)
+from datetime import datetime, timezone, timedelta
+from sqlalchemy import and_
 import logging
+from ..secure.schemas import EmailRequest
+import httpx
 
 router = APIRouter()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 firebase_auth = get_firebase_admin()
 
 @router.get("/")
@@ -433,6 +444,224 @@ async def delete_transaction(
             raise HTTPException(status_code=500, detail="Failed to delete transaction")
 
         return {"message": "Transaction deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+async def check_and_send_alerts(background_tasks: BackgroundTasks, db: Session):
+    """Background task to check price alerts and send notifications"""
+    try:
+        # Get current UTC hour from UTC+7
+        jakarta_time = datetime.now(timezone.utc) + timedelta(hours=7)
+        current_hour_utc = (jakarta_time.hour - 7) % 24
+        
+        # Get all active alerts for current hour
+        alerts = db.query(StockAlert).filter(
+            and_(
+                StockAlert.is_active == True,
+                StockAlert.notification_hour == current_hour_utc
+            )
+        ).all()
+        
+        if not alerts:
+            return
+            
+        # Group alerts by user
+        alerts_by_user = {}
+        for alert in alerts:
+            if alert.uid not in alerts_by_user:
+                alerts_by_user[alert.uid] = []
+            alerts_by_user[alert.uid].append(alert)
+            
+        # Process alerts for each user
+        for uid, user_alerts in alerts_by_user.items():
+            triggered_alerts = []
+            
+            for alert in user_alerts:
+                try:
+                    # Get current stock price
+                    today = datetime.now(timezone.utc).date()
+                    date_str = f"{today}_{today}"
+                    stock_data = await get_stock_price(alert.stock_code, date_str, db)
+                    
+                    if not stock_data.prices:
+                        continue
+                        
+                    current_price = stock_data.prices[-1].closing_price
+                    
+                    # Check if price trigger condition is met
+                    is_triggered = (
+                        (alert.trigger_type == PriceTriggerType.ABOVE and current_price > alert.trigger_price) or
+                        (alert.trigger_type == PriceTriggerType.BELOW and current_price < alert.trigger_price)
+                    )
+                    
+                    if is_triggered:
+                        triggered_alerts.append({
+                            "stock_code": alert.stock_code,
+                            "current_price": current_price,
+                            "trigger_price": alert.trigger_price,
+                            "trigger_type": alert.trigger_type
+                        })
+                        
+                        # Update alert status
+                        alert.last_checked = datetime.now(timezone.utc)
+                        alert.last_notified = datetime.now(timezone.utc)
+                        
+                        # If not repeating, deactivate the alert
+                        if not alert.is_repeating:
+                            alert.is_active = False
+                            
+                except Exception as e:
+                    logger.error(f"Error checking alert {alert.id}: {str(e)}")
+                    continue
+            
+            # If any alerts were triggered for this user, send email
+            if triggered_alerts:
+                try:
+                    # Get user email from Firebase
+                    user = firebase_auth.get_user(uid)
+                    
+                    # Create email content
+                    email_body = "<h2>Stock Price Alert</h2>"
+                    for alert in triggered_alerts:
+                        condition = "above" if alert["trigger_type"] == PriceTriggerType.ABOVE else "below"
+                        email_body += f"""
+                        <p>
+                            Stock: {alert["stock_code"]}<br>
+                            Current Price: {alert["current_price"]}<br>
+                            Trigger: {condition} {alert["trigger_price"]}<br>
+                        </p>
+                        """
+                    
+                    # Send email using existing endpoint
+                    email_request = EmailRequest(
+                        recipient_email=user.email,
+                        subject="Stock Price Alert",
+                        body=email_body
+                    )
+                    
+                    # Call the secure email endpoint
+                    async with httpx.AsyncClient() as client:
+                        response = await client.post(
+                            "http://localhost:8000/secure/send-email",
+                            json=email_request.dict()
+                        )
+                        if response.status_code != 200:
+                            raise Exception(f"Failed to send email: {response.text}")
+                    
+                except Exception as e:
+                    logger.error(f"Error sending alert email to user {uid}: {str(e)}")
+        
+        # Commit all changes
+        db.commit()
+        
+    except Exception as e:
+        logger.error(f"Error in check_and_send_alerts: {str(e)}")
+        db.rollback()
+
+@router.post("/alerts", response_model=StockAlertResponse)
+async def create_alert(
+    alert: StockAlertCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Verify token and get user info
+        try:
+            decoded_token = auth.verify_id_token(alert.token)
+            uid = decoded_token['uid']
+        except Exception as e:
+            raise HTTPException(status_code=401, detail="Invalid account token")
+
+        # Validate notification hour (in UTC+7)
+        if not 0 <= alert.notification_hour <= 23:
+            raise HTTPException(
+                status_code=400,
+                detail="Notification hour must be between 0 and 23"
+            )
+
+        # Convert UTC+7 to UTC
+        utc_hour = (alert.notification_hour - 7) % 24
+
+        # Create new alert
+        db_alert = StockAlert(
+            uid=uid,
+            stock_code=alert.stock_code,
+            trigger_price=alert.trigger_price,
+            trigger_type=alert.trigger_type,
+            notification_hour=utc_hour,  # Store in UTC
+            is_repeating=alert.is_repeating
+        )
+
+        db.add(db_alert)
+        db.commit()
+        db.refresh(db_alert)
+
+        # Schedule initial check
+        background_tasks.add_task(check_and_send_alerts, background_tasks, db)
+
+        return db_alert
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/alerts/list", response_model=StockAlertListResponse)
+async def list_alerts(
+    request: StockAlertList,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Verify token and get user info
+        try:
+            decoded_token = auth.verify_id_token(request.token)
+            uid = decoded_token['uid']
+        except Exception as e:
+            raise HTTPException(status_code=401, detail="Invalid account token")
+
+        # Get user's alerts
+        alerts = db.query(StockAlert).filter(
+            StockAlert.uid == uid
+        ).all()
+
+        return StockAlertListResponse(alerts=alerts or [])
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/alerts/delete/{alert_id}")
+async def delete_alert(
+    alert_id: str,
+    request: StockAlertDelete,
+    db: Session = Depends(get_db)
+):
+    try:
+        # Verify token and get user info
+        try:
+            decoded_token = auth.verify_id_token(request.token)
+            uid = decoded_token['uid']
+        except Exception as e:
+            raise HTTPException(status_code=401, detail="Invalid account token")
+
+        # Get alert
+        alert = db.query(StockAlert).filter(
+            StockAlert.id == alert_id,
+            StockAlert.uid == uid
+        ).first()
+        
+        if not alert:
+            raise HTTPException(status_code=404, detail="Alert not found")
+
+        # Delete alert
+        db.delete(alert)
+        db.commit()
+
+        return {"message": "Alert deleted successfully"}
 
     except HTTPException:
         raise

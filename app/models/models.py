@@ -2,7 +2,7 @@ from sqlalchemy import Column, String, Date, Enum, UniqueConstraint
 from sqlalchemy.sql import func
 import uuid
 from ..db.database import Base
-from sqlalchemy import Column, String, DateTime, Integer, PrimaryKeyConstraint, BigInteger,Float
+from sqlalchemy import Column, String, DateTime, Integer, Boolean, BigInteger,Float
 import enum
 from datetime import datetime, timezone, date
 
@@ -80,3 +80,22 @@ class CompanyInfo(Base):
     market_cap = Column(BigInteger, nullable=True)
     description = Column(String, nullable=True)
     last_updated = Column(DateTime(timezone=True), server_default=func.now())
+
+class PriceTriggerType(str, enum.Enum):
+    ABOVE = "above"
+    BELOW = "below"
+
+class StockAlert(Base):
+    __tablename__ = "stock_alerts"
+    
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    uid = Column(String, index=True, nullable=False)  # Firebase user ID
+    stock_code = Column(String, nullable=False)
+    trigger_price = Column(Integer, nullable=False)
+    trigger_type = Column(Enum(PriceTriggerType), nullable=False)
+    notification_hour = Column(Integer, nullable=False)  # 0-23 hour in UTC
+    is_repeating = Column(Boolean, default=False)
+    is_active = Column(Boolean, default=True)
+    last_checked = Column(DateTime(timezone=True), nullable=True)
+    last_notified = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

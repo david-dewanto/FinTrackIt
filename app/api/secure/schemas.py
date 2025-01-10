@@ -117,7 +117,7 @@ class PortfolioReturnResponse(BaseModel):
     calculation_date: datetime
     start_date: datetime
     end_date: datetime
-    stock_breakdown: Dict[str, Dict[str, float]]  # e.g., {"BBCA": {"twr": 0.083, "mwr": 0.0825}}
+    stock_breakdown: Dict[str, Dict[str, float]] = {}  # Default empty dict
     
     class Config:
         from_attributes = True
