@@ -622,8 +622,6 @@ app/
 - **NumPy/SciPy**: Mathematical computations
 - **Pydantic**: Data validation
 
-## 👨‍💻 Development Guide
-
 ### Security Best Practices
 
 - All secure endpoints require authentication
