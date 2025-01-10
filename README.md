@@ -1,7 +1,7 @@
 # Final Task (Teknologi Sistem Terintegrasi)
 
 
-# 📈 Stock Market Analysis & Portfolio Management API
+# 📈 FinTrackIt API
 
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104.1-009688.svg?style=flat&logo=FastAPI&logoColor=white)](https://fastapi.tiangolo.com)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB.svg?style=flat&logo=Python&logoColor=white)](https://www.python.org)
@@ -121,6 +121,17 @@ docker-compose up -d
 ### Secure Routes (/api/secure)
 
 <details>
+<summary><b>GET /api/secure</b> - Check secure endpoint status</summary>
+
+#### Response
+```json
+{
+  "message": "This is a secure endpoint"
+}
+```
+</details>
+
+<details>
 <summary><b>GET /api/secure/stock-price/{stock_code}/{date_range}</b> - Get historical stock prices</summary>
 
 #### Parameters
@@ -168,7 +179,8 @@ docker-compose up -d
 ```json
 {
   "stock_codes": ["BBCA", "TLKM", "UNVR"],
-  "target_return": 0.15
+  "target_return": 0.15,
+  "target_volatility": null
 }
 ```
 
@@ -184,7 +196,69 @@ docker-compose up -d
   ],
   "expected_return": 0.15,
   "expected_volatility": 0.12,
-  "sharpe_ratio": 1.45
+  "sharpe_ratio": 1.45,
+  "risk_free_rate": 0.055,
+  "optimization_criteria": "return",
+  "target_value": 0.15
+}
+```
+</details>
+
+<details>
+<summary><b>POST /api/secure/portfolio-ranges</b> - Get feasible portfolio ranges</summary>
+
+#### Request
+```json
+{
+  "stock_codes": ["BBCA", "TLKM"]
+}
+```
+
+#### Response
+```json
+{
+  "return_range": {
+    "min": 0.05,
+    "max": 0.25
+  },
+  "volatility_range": {
+    "min": 0.10,
+    "max": 0.30
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>POST /api/secure/calculate-portfolio-returns</b> - Calculate portfolio returns</summary>
+
+#### Request
+```json
+{
+  "transactions": [
+    {
+      "id": "tx_123",
+      "uid": "user_123",
+      "stock_code": "BBCA",
+      "transaction_type": "buy",
+      "quantity": 100,
+      "price_per_share": 8500,
+      "total_value": 850000,
+      "transaction_date": "2024-01-10T14:30:00Z"
+    }
+  ]
+}
+```
+
+#### Response
+```json
+{
+  "portfolio_twr": 0.156,
+  "portfolio_mwr": 0.145,
+  "calculation_date": "2024-01-15T08:30:00Z",
+  "start_date": "2024-01-10T14:30:00Z",
+  "end_date": "2024-01-15T00:00:00Z",
+  "stock_breakdown": {}
 }
 ```
 </details>
@@ -213,6 +287,17 @@ docker-compose up -d
 ### Internal Routes (/api/internal)
 
 <details>
+<summary><b>GET /api/internal</b> - Check internal endpoint status</summary>
+
+#### Response
+```json
+{
+  "message": "This is an internal endpoint"
+}
+```
+</details>
+
+<details>
 <summary><b>POST /api/internal/generate-api-key</b> - Generate API key</summary>
 
 #### Request
@@ -237,7 +322,96 @@ docker-compose up -d
 </details>
 
 <details>
-<summary><b>POST /api/internal/transactions</b> - Record stock transaction</summary>
+<summary><b>POST /api/internal/auth/signin/email</b> - Sign in with email</summary>
+
+#### Request
+```json
+{
+  "email": "user@example.com",
+  "password": "password123"
+}
+```
+
+#### Response
+```json
+{
+  "uid": "user123",
+  "email": "user@example.com",
+  "email_verified": true,
+  "display_name": "John Doe",
+  "id_token": "firebase_id_token",
+  "message": null
+}
+```
+</details>
+
+<details>
+<summary><b>POST /api/internal/auth/signup/email</b> - Sign up with email</summary>
+
+#### Request
+```json
+{
+  "email": "user@example.com",
+  "password": "password123",
+  "display_name": "John Doe"
+}
+```
+
+#### Response
+```json
+{
+  "uid": "user123",
+  "email": "user@example.com",
+  "email_verified": false,
+  "message": "Please check your email for verification link"
+}
+```
+</details>
+
+<details>
+<summary><b>POST /api/internal/auth/reset-password</b> - Reset password</summary>
+
+#### Request
+```json
+{
+  "email": "user@example.com"
+}
+```
+
+#### Response
+```json
+{
+  "success": true,
+  "message": "Password reset email sent successfully"
+}
+```
+</details>
+
+<details>
+<summary><b>POST /api/internal/auth/signin/google</b> - Sign in with Google</summary>
+
+#### Request
+```json
+{
+  "id_token": "google_id_token"
+}
+```
+
+#### Response
+```json
+{
+  "uid": "user123",
+  "email": "user@example.com",
+  "email_verified": true,
+  "display_name": "John Doe",
+  "id_token": "firebase_id_token",
+  "message": null
+}
+```
+</details>
+
+<details>
+<summary><b>POST /api/internal/transactions</b> - Create new transaction</summary>
 
 #### Request
 ```json
@@ -258,7 +432,53 @@ docker-compose up -d
   "quantity": 100,
   "price_per_share": 9450,
   "total_value": 945000,
-  ...
+  "transaction_date": "2024-01-10T14:30:00Z"
+}
+```
+</details>
+
+<details>
+<summary><b>POST /api/internal/transactions/list</b> - Get user transactions</summary>
+
+#### Request
+```json
+{
+  "token": "firebase_id_token"
+}
+```
+
+#### Response
+```json
+{
+  "transactions": [
+    {
+      "id": "tx_123",
+      "stock_code": "BBCA",
+      "quantity": 100,
+      "price_per_share": 9450,
+      "total_value": 945000,
+      "transaction_date": "2024-01-10T14:30:00Z"
+    },
+    ...
+  ]
+}
+```
+</details>
+
+<details>
+<summary><b>POST /api/internal/transactions/delete/{transaction_id}</b> - Delete transaction</summary>
+
+#### Request
+```json
+{
+  "token": "firebase_id_token"
+}
+```
+
+#### Response
+```json
+{
+  "message": "Transaction deleted successfully"
 }
 ```
 </details>
@@ -284,7 +504,79 @@ docker-compose up -d
   "id": "alert_123",
   "stock_code": "BBCA",
   "trigger_price": 9500,
-  ...
+  "trigger_type": "above",
+  "notification_hour": 9,
+  "is_repeating": true,
+  "is_active": true
+}
+```
+</details>
+
+<details>
+<summary><b>POST /api/internal/alerts/list</b> - Get user alerts</summary>
+
+#### Request
+```json
+{
+  "token": "firebase_id_token"
+}
+```
+
+#### Response
+```json
+{
+  "alerts": [
+    {
+      "id": "alert_123",
+      "stock_code": "BBCA",
+      "trigger_price": 9500,
+      "trigger_type": "above",
+      "notification_hour": 9,
+      "is_repeating": true,
+      "is_active": true
+    },
+    ...
+  ]
+}
+```
+</details>
+
+<details>
+<summary><b>POST /api/internal/alerts/delete/{alert_id}</b> - Delete alert</summary>
+
+#### Request
+```json
+{
+  "token": "firebase_id_token"
+}
+```
+
+#### Response
+```json
+{
+  "message": "Alert deleted successfully"
+}
+```
+</details>
+
+<details>
+<summary><b>POST /api/internal/analyze-stocks</b> - Analyze stocks using Pintar Ekspor's analytics service</summary>
+
+#### Request
+```json
+{
+  "stock_codes": ["BBCA", "TLKM"]
+}
+```
+
+#### Response
+```json
+{
+  "analysis_results": {
+    "trends": [...],
+    "forecasts": [...],
+    "metrics": {...}
+  }
 }
 ```
 </details>
