@@ -19,11 +19,13 @@ from .schemas import (
     StockAlertCreate, StockAlertResponse, StockAlertList,
     StockAlertListResponse, StockAlertDelete
 )
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from sqlalchemy import and_
 import logging
 from ..secure.schemas import EmailRequest
 import httpx
+import io
+import csv
 
 router = APIRouter()
 logging.basicConfig(level=logging.INFO)
@@ -667,3 +669,107 @@ async def delete_alert(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+@router.post("/analyze-stocks")
+async def analyze_stocks(
+    request: schemas.StockAnalysisRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Analyze historical stock data using Pintar Ekspor's analytics service.
+    
+    Steps:
+    1. Fetch 3 years of historical data for each requested stock
+    2. Format data into required CSV structure
+    3. Send to analytics API
+    4. Return analysis results
+    """
+    try:
+        # Calculate date range (3 years from today)
+        end_date = date.today()
+        start_date = end_date - timedelta(days=3*365)
+        date_range = f"{start_date.isoformat()}_{end_date.isoformat()}"
+        
+        # Create CSV in memory
+        csv_buffer = io.StringIO()
+        csv_writer = csv.writer(csv_buffer)
+        csv_writer.writerow(['date', 'category', 'value'])  # Write header
+        
+        # Fetch and write data for each stock
+        for stock_code in request.stock_codes:
+            try:
+                # Get historical prices using existing endpoint
+                stock_data = await get_stock_price(stock_code, date_range, db)
+                
+                # Write each price point to CSV
+                for price_data in stock_data.prices:
+                    csv_writer.writerow([
+                        price_data.date.isoformat(),
+                        stock_code,
+                        price_data.closing_price
+                    ])
+                    
+            except Exception as e:
+                logger.error(f"Error fetching data for {stock_code}: {str(e)}")
+                continue
+        
+        # Prepare the CSV data
+        csv_content = csv_buffer.getvalue()
+        csv_buffer.close()
+        
+        # If no data was written, return error
+        if csv_content.count('\n') <= 1:  # Only header exists
+            raise HTTPException(
+                status_code=400,
+                detail="No valid stock data found for analysis"
+            )
+            
+        # Convert string CSV to bytes for file upload
+        csv_bytes = csv_content.encode('utf-8')
+        
+        # Prepare file for upload
+        files = {
+            'file': ('stock_data.csv', csv_bytes, 'text/csv')
+        }
+        
+        # Set query parameters with default values
+        params = {
+            'include_forecast': 'true',
+            'include_visualizations': 'false',
+            'export_format': 'json'
+        }
+        
+        # Send request to analytics API
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(
+                    'https://pintar-ekspor-production.up.railway.app/analytics/analyze',
+                    params=params,
+                    files=files,
+                    headers={
+                        'X-API-Key': 'pntr_Seg5n36d0C7ffE8x7yZ_0TCIyLa76tp6atgyDx24RBw'
+                    },
+                    timeout=30.0  # Set reasonable timeout
+                )
+                
+                # Check response status
+                response.raise_for_status()
+                
+                # Return the analytics response directly
+                return response.json()
+                
+            except httpx.HTTPError as e:
+                logger.error(f"Analytics API error: {str(e)}")
+                raise HTTPException(
+                    status_code=503,
+                    detail="Pintar Ekspor (Friend's Server) is down"
+                )
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in analyze_stocks: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )

@@ -126,3 +126,6 @@ class StockAlertListResponse(BaseModel):
 
 class StockAlertDelete(BaseModel):
     token: str
+
+class StockAnalysisRequest(BaseModel):
+    stock_codes: List[str]
