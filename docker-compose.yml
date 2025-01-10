@@ -1,0 +1,43 @@
+services:
+  fastapi:
+    image: ghcr.io/david-dewanto/fintrackit
+    container_name: fastapi_app
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - SQLALCHEMY_DATABASE_URL=
+      - JWT_SECRET=
+      - FIREBASE_SERVICE_ACCOUNT_PATH=
+      - FIREBASE_WEB_API_KEY=
+      - INTERNAL_API_KEY=
+      - REDIS_URL=
+    depends_on:
+      - postgres_db
+      - redis
+
+  postgres_db:
+    image: postgres:15
+    container_name: postgres_db
+    restart: always
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=
+      - POSTGRES_PASSWORD=
+      - POSTGRES_DB=
+    volumes:
+      - postgres_data:
+
+  redis:
+    image: redis:alpine
+    container_name: redis_cache
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:  

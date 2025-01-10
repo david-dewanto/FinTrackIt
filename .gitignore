@@ -2,4 +2,3 @@ venv
 nginx.conf
 firebase-service-account.json
 .env
-docker-compose.yml
