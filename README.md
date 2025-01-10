@@ -75,7 +75,7 @@ Create a `.env` file in the root directory with the following variables:
 
 1. Build the Docker image:
 ```bash
-docker build -t stock-market-api .
+docker build -t .
 ```
 
 2. Run with Docker Compose:
